@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser};
+mod moving_average_correction;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -21,31 +22,40 @@ fn main() {
     let spec = reader.spec();
     let mut writer = hound::WavWriter::create(cli.out_file, spec).unwrap();
 
-    let mut rolling_avg = 0.0;
-    let center = cli.samples_to_consider / 2;
-    let mut samples_for_avg = vec![0.0; cli.samples_to_consider];
-
-    for (i, s) in reader.samples::<i16>().enumerate() {
-	let sample = s.unwrap() as f64;
-	let write_index = i % cli.samples_to_consider;
-	let read_index = (i + center) % cli.samples_to_consider;
-	let sample_to_remove = samples_for_avg[write_index];
-	rolling_avg -= sample_to_remove / cli.samples_to_consider as f64;
-	samples_for_avg[write_index] = sample;
-	rolling_avg += sample / cli.samples_to_consider as f64;
-	if i < center {
-	    continue;
-	} else if i == cli.samples_to_consider {
-	    for j in 0..center {
-		let new_sample = (samples_for_avg[j] - rolling_avg) as i16;
-		writer.write_sample(new_sample).unwrap();
+    match spec.sample_format {
+	hound::SampleFormat::Float => {
+	    let samples = reader.samples::<f32>().map(|x| x.unwrap());
+	    let correction = moving_average_correction::MovingAverageDCOffsetCorrection::new(
+		samples,
+		cli.samples_to_consider,
+	    );
+	    for s in correction {
+		writer.write_sample(s).ok();
 	    }
-	}
-	let new_sample = (samples_for_avg[read_index] - rolling_avg) as i16;
-	writer.write_sample(new_sample).unwrap();
-    }
-    for i in center + 1..cli.samples_to_consider {
-	writer.write_sample((samples_for_avg[i] - rolling_avg) as i16).unwrap();
-    }
-    writer.finalize().unwrap()
+	},
+	hound::SampleFormat::Int => match spec.bits_per_sample {
+	    16 => {
+		let samples = reader.samples::<i16>().map(|x| x.unwrap());
+		let correction = moving_average_correction::MovingAverageDCOffsetCorrection::new(
+		    samples,
+		    cli.samples_to_consider,
+		);
+		for s in correction {
+		    writer.write_sample(s).ok();
+		}
+	    },
+	    _ => {
+		let samples = reader.samples::<i32>().map(|x| x.unwrap());
+		let correction = moving_average_correction::MovingAverageDCOffsetCorrection::new(
+		    samples,
+		    cli.samples_to_consider,
+		);
+		for s in correction {
+		    writer.write_sample(s).ok();
+		}
+	    },
+	},
+    };
+
+    writer.finalize().unwrap();
 }
